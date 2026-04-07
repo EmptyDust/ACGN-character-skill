@@ -8,6 +8,10 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
 [![Whisper](https://img.shields.io/badge/Whisper-large--v3-orange)](https://github.com/openai/whisper)
 
+![立绘图](imgs/立绘图.png)
+
+
+
 <br>
 
 将虚构角色蒸馏成可对话的 AI Skill。<br>
@@ -19,6 +23,10 @@
 将「工作能力 + 人格」适配为「角色设定 + 人格」。
 
 </div>
+
+**Notice:**
+
+**目前效果并不完善，同时记忆相较于完整舰长线仍有大幅缺失。目前采用的是语音提取为文本作为角色故事用于蒸馏，然而部分剧情没有语音，需要通过视觉方案来获取对话文本，缺失部分在之后的计划之内。**
 
 ---
 
