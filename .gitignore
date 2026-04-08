@@ -8,6 +8,9 @@ live2d/
 # 训练数据
 training data/
 
+# API配置（包含敏感信息）
+benchmark/config.yaml
+
 # Claude Code
 .claude/
 .humanize*
