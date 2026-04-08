@@ -1,0 +1,42 @@
+description: ROI configuration for dialogue extraction
+dialogue_box:
+  position: bottom-center
+  preprocessing:
+    notes: Semi-transparent background with outlined text
+    profile: semi_transparent_hsv
+  roi:
+    height: 170
+    notes: Approximate coordinates, needs calibration
+    width: 1540
+    x: 90
+    y: 785
+name_box:
+  position: bottom-left
+  preprocessing:
+    notes: Same style as dialogue box
+    profile: semi_transparent_hsv
+  roi:
+    height: 78
+    notes: Above dialogue box, left-aligned
+    width: 210
+    x: 95
+    y: 708
+resolution:
+  height: 1080
+  notes: Base resolution for ROI coordinates
+  width: 1920
+special_regions:
+  battle_caption:
+    enabled: false
+    notes: Optional region for battle scene captions
+    roi:
+      height: 120
+      width: 1480
+      x: 120
+      y: 820
+validation:
+  calibrated: false
+  calibration_date: null
+  calibration_frames: []
+  notes: Set calibrated=True after manual validation
+work_id: yuexia_ep01
