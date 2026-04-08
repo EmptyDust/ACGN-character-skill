@@ -46,11 +46,12 @@ class ROICalibrator:
         self.video_path = video_path
         self.config = None
 
-    def create_interactive_config(self, work_id: str, width: int, height: int) -> ROIConfig:
+    def create_interactive_config(self, work_id: str, width: int, height: int, frame_path: Optional[Path] = None) -> ROIConfig:
         """
-        Create ROI configuration interactively via CLI.
+        Create ROI configuration interactively.
 
-        For GUI-based calibration, use opencv-python's cv2.selectROI().
+        If frame_path is provided and opencv is available, uses GUI-based ROI selection.
+        Otherwise falls back to CLI-based coordinate input.
         """
         print(f"\n=== ROI Configuration for {work_id} ===")
         print(f"Video resolution: {width}x{height}")
@@ -58,6 +59,83 @@ class ROICalibrator:
 
         config_dict = create_default_config(work_id, width, height)
 
+        # Try GUI-based calibration if frame is provided
+        if frame_path:
+            try:
+                import cv2
+                import numpy as np
+
+                frame = cv2.imread(str(frame_path))
+                if frame is None:
+                    print(f"Warning: Could not load frame {frame_path}")
+                    print("Falling back to CLI-based input")
+                else:
+                    print(f"Loaded frame: {frame_path}")
+                    print(f"Frame size: {frame.shape[1]}x{frame.shape[0]}")
+                    print()
+
+                    # Select dialogue box ROI
+                    print("Select DIALOGUE BOX region (bottom dialogue text area)")
+                    print("  - Click and drag to select the region")
+                    print("  - Press ENTER to confirm")
+                    print("  - Press C to cancel and use defaults")
+
+                    dialogue_roi = cv2.selectROI("Select Dialogue Box ROI", frame, fromCenter=False, showCrosshair=True)
+                    cv2.destroyAllWindows()
+
+                    if dialogue_roi[2] > 0 and dialogue_roi[3] > 0:
+                        config_dict['dialogue_box']['roi'] = {
+                            'x': int(dialogue_roi[0]),
+                            'y': int(dialogue_roi[1]),
+                            'width': int(dialogue_roi[2]),
+                            'height': int(dialogue_roi[3]),
+                            'notes': f'GUI-calibrated from {frame_path.name}'
+                        }
+                        print(f"Dialogue box ROI: x={dialogue_roi[0]}, y={dialogue_roi[1]}, w={dialogue_roi[2]}, h={dialogue_roi[3]}")
+                    else:
+                        print("No selection made, using defaults")
+
+                    print()
+
+                    # Select name box ROI
+                    print("Select NAME BOX region (character name above dialogue)")
+                    print("  - Click and drag to select the region")
+                    print("  - Press ENTER to confirm")
+                    print("  - Press C to cancel and use defaults")
+
+                    name_roi = cv2.selectROI("Select Name Box ROI", frame, fromCenter=False, showCrosshair=True)
+                    cv2.destroyAllWindows()
+
+                    if name_roi[2] > 0 and name_roi[3] > 0:
+                        config_dict['name_box']['roi'] = {
+                            'x': int(name_roi[0]),
+                            'y': int(name_roi[1]),
+                            'width': int(name_roi[2]),
+                            'height': int(name_roi[3]),
+                            'notes': f'GUI-calibrated from {frame_path.name}'
+                        }
+                        print(f"Name box ROI: x={name_roi[0]}, y={name_roi[1]}, w={name_roi[2]}, h={name_roi[3]}")
+                    else:
+                        print("No selection made, using defaults")
+
+                    # Mark as calibrated
+                    config_dict['validation']['calibrated'] = True
+                    config_dict['validation']['calibration_date'] = None  # Will be set on save
+                    config_dict['validation']['calibration_frames'] = [str(frame_path)]
+                    config_dict['validation']['notes'] = 'GUI-calibrated with cv2.selectROI()'
+
+                    return ROIConfig(config_dict)
+
+            except ImportError:
+                print("opencv-python not installed, falling back to CLI-based input")
+                print("Install with: pip install opencv-python")
+                print()
+
+        # CLI-based fallback
+        return self._create_cli_config(work_id, width, height, config_dict)
+
+    def _create_cli_config(self, work_id: str, width: int, height: int, config_dict: dict) -> ROIConfig:
+        """Create configuration via CLI prompts."""
         # Dialogue box configuration
         print("Dialogue Box ROI:")
         print("  Default: x=90, y=785, width=1540, height=170")
@@ -134,15 +212,62 @@ class ROICalibrator:
                 print(f"  - {f}")
             return False
 
-        # Basic validation passed
-        print("[OK] Configuration structure is valid")
-        print("[OK] All validation frames exist")
-        print()
-        print("Note: Visual validation requires opencv-python")
-        print("      Install with: pip install opencv-python")
-        print("      Then use --extract-crops to inspect ROI regions")
+        # Try visual validation with opencv
+        try:
+            import cv2
 
-        return True
+            dialogue_roi = config.get_dialogue_box_roi()
+            name_roi = config.get_name_box_roi()
+
+            issues = []
+
+            for i, frame_path in enumerate(frame_paths):
+                frame = cv2.imread(str(frame_path))
+                if frame is None:
+                    issues.append(f"Frame {i}: Could not read {frame_path}")
+                    continue
+
+                frame_h, frame_w = frame.shape[:2]
+
+                # Check dialogue box bounds
+                dx, dy, dw, dh = dialogue_roi
+                if dx < 0 or dy < 0 or dx + dw > frame_w or dy + dh > frame_h:
+                    issues.append(f"Frame {i}: Dialogue box ROI out of bounds ({frame_w}x{frame_h})")
+
+                # Check name box bounds
+                nx, ny, nw, nh = name_roi
+                if nx < 0 or ny < 0 or nx + nw > frame_w or ny + nh > frame_h:
+                    issues.append(f"Frame {i}: Name box ROI out of bounds ({frame_w}x{frame_h})")
+
+                # Check if ROIs are too small
+                if dw < 100 or dh < 20:
+                    issues.append(f"Frame {i}: Dialogue box ROI too small ({dw}x{dh})")
+                if nw < 50 or nh < 20:
+                    issues.append(f"Frame {i}: Name box ROI too small ({nw}x{nh})")
+
+            if issues:
+                print("\nValidation issues found:")
+                for issue in issues:
+                    print(f"  - {issue}")
+                return False
+
+            print("[OK] Configuration structure is valid")
+            print("[OK] All validation frames exist")
+            print("[OK] ROI bounds are valid across all frames")
+            print("[OK] ROI dimensions are reasonable")
+
+            return True
+
+        except ImportError:
+            # Fallback to basic validation without opencv
+            print("[OK] Configuration structure is valid")
+            print("[OK] All validation frames exist")
+            print()
+            print("Note: Visual validation requires opencv-python")
+            print("      Install with: pip install opencv-python")
+            print("      Then re-run validation for full ROI quality checks")
+
+            return True
 
     def extract_roi_crops(self, config: ROIConfig, frame_paths: List[Path], output_dir: Path):
         """
@@ -219,6 +344,8 @@ def main():
                        help="Video width (default: 1920)")
     parser.add_argument("--height", type=int, default=1080,
                        help="Video height (default: 1080)")
+    parser.add_argument("--frame", type=str,
+                       help="Sample frame for GUI-based ROI selection (used with --create)")
     parser.add_argument("--frames", type=str, nargs='+',
                        help="Frame paths for validation")
     parser.add_argument("--crops-output", type=str, default="roi_crops",
@@ -230,7 +357,8 @@ def main():
 
     # Create new configuration
     if args.create:
-        config = calibrator.create_interactive_config(args.work_id, args.width, args.height)
+        frame_path = Path(args.frame) if args.frame else None
+        config = calibrator.create_interactive_config(args.work_id, args.width, args.height, frame_path)
 
         if args.output:
             output_path = Path(args.output)
@@ -274,7 +402,10 @@ def main():
     else:
         parser.print_help()
         print("\nExamples:")
-        print("  # Create new configuration interactively")
+        print("  # Create new configuration with GUI-based ROI selection (recommended)")
+        print("  python roi_calibrator.py --create --work-id yuexia_ep01 --frame sample.jpg --output config.yaml")
+        print()
+        print("  # Create new configuration with CLI-based input")
         print("  python roi_calibrator.py --create --work-id yuexia_ep01 --output config.yaml")
         print()
         print("  # Validate configuration with sample frames")
