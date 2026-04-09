@@ -6,7 +6,7 @@ from typing import Callable, List, Optional
 
 from PIL import Image
 
-from tools.dialogue_extractor import create_ocr_func
+from tools.ocr_engines import create_ocr_func
 
 
 class OCRFusion:

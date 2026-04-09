@@ -29,6 +29,7 @@ class DialogueEventOutput:
     source_file: Optional[str] = None
     frame_file: Optional[str] = None
     roi_crop_file: Optional[str] = None
+    name_crop_file: Optional[str] = None
     ocr_candidates: Optional[List[Dict[str, object]]] = None
 
 
@@ -109,6 +110,7 @@ def event_to_output(
         source_file=prov.get("source_file"),
         frame_file=prov.get("frame_file"),
         roi_crop_file=prov.get("roi_crop_file"),
+        name_crop_file=prov.get("name_crop_file"),
         ocr_candidates=ocr_candidates
     )
 
