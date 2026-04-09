@@ -284,14 +284,6 @@ class DialogueExtractor:
                     if dialog_crop is None:
                         continue
 
-                    # Cache speaker on first frame of a new event
-                    if event_detector.current_event is not None and cached_speaker is None:
-                        name_crop = vp.crop_roi(frame, "name_box")
-                        s, sc = speaker_extractor.extract_speaker(name_crop)
-                        if s is not None:
-                            cached_speaker = s
-                            cached_speaker_conf = sc
-
                     # Feed to event detector
                     finalized_event = event_detector.process_frame(dialog_crop, timestamp)
 
@@ -331,9 +323,9 @@ class DialogueExtractor:
                             provenance=provenance,
                         )
 
-                        # Track review count
+                        # Track review count (must match JSONL review_required logic)
                         min_conf = min(finalized_event.confidence, speaker_conf) if speaker else finalized_event.confidence
-                        if min_conf < self.review_threshold:
+                        if min_conf < self.review_threshold or speaker is None:
                             review_count += 1
 
                         # Save checkpoint
@@ -350,16 +342,22 @@ class DialogueExtractor:
                         print(f"[progress] {timestamp:.1f}s / {duration:.1f}s ({progress:.0f}%), events: {event_count}")
                         last_log_time = timestamp
 
+                    # Cache speaker for active event (after process_frame may have created one)
+                    if event_detector.current_event is not None and cached_speaker is None:
+                        name_crop = vp.crop_roi(frame, "name_box")
+                        s, sc = speaker_extractor.extract_speaker(name_crop)
+                        if s is not None:
+                            cached_speaker = s
+                            cached_speaker_conf = sc
+
                 # Flush remaining event at end of video
                 final_event = event_detector.flush(duration)
                 if final_event:
                     event_count += 1
 
-                    name_crop = vp.crop_roi(
-                        last_frame or Image.new("RGB", (1, 1)),
-                        "name_box",
-                    )
-                    speaker, speaker_conf = speaker_extractor.extract_speaker(name_crop)
+                    # Use cached speaker, falling back to text parsing
+                    speaker = cached_speaker
+                    speaker_conf = cached_speaker_conf
 
                     if speaker is None:
                         speaker, speaker_conf = _parse_speaker_from_text(final_event)
@@ -374,7 +372,7 @@ class DialogueExtractor:
                     )
 
                     min_conf = min(final_event.confidence, speaker_conf) if speaker else final_event.confidence
-                    if min_conf < self.review_threshold:
+                    if min_conf < self.review_threshold or speaker is None:
                         review_count += 1
 
                     speaker_str = speaker or "?"
