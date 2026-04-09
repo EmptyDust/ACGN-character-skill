@@ -36,12 +36,13 @@ def create_ocr_func(engine: str) -> Callable[[Image.Image], tuple[str, float]]:
 def _create_paddleocr():
     import os
     os.environ.setdefault('FLAGS_call_stack_level', '2')
+    os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
     try:
         from paddleocr import PaddleOCR
     except ImportError:
         raise ImportError("PaddleOCR not installed. Run: pip install paddleocr")
 
-    ocr = PaddleOCR(use_textline_orientation=True, lang="ch")
+    ocr = PaddleOCR(use_textline_orientation=True, lang="ch", show_log=False)
 
     def ocr_func(image: Image.Image) -> tuple[str, float]:
         import numpy as np
@@ -101,6 +102,37 @@ def _create_rapidocr():
     return ocr_func
 
 
+def _parse_speaker_from_text(event) -> tuple:
+    """
+    Parse speaker name from the beginning of dialog text.
+
+    In many visual novels, the OCR captures the speaker name as the first
+    word/line in the dialog box (e.g., "舰长 啊啊，异世界真好啊。").
+    This function splits the speaker from the dialog text.
+
+    Returns:
+        (speaker, confidence) or (None, 0.0) if no speaker found
+    """
+    text = event.text.strip()
+    if not text:
+        return (None, 0.0)
+
+    # Try splitting on first space
+    parts = text.split(" ", 1)
+    if len(parts) == 2:
+        candidate = parts[0].strip()
+        # Speaker names are typically 1-4 Chinese characters
+        if 1 <= len(candidate) <= 4 and len(parts[1].strip()) > 0:
+            # Update event text to remove speaker prefix
+            event.text = parts[1].strip()
+            # Normalize special speakers
+            from tools.speaker_extractor import DEFAULT_SPECIAL_SPEAKERS
+            speaker = DEFAULT_SPECIAL_SPEAKERS.get(candidate, candidate)
+            return (speaker, event.confidence)
+
+    return (None, 0.0)
+
+
 class DialogueExtractor:
     """
     Main dialogue extraction pipeline.
@@ -109,6 +141,9 @@ class DialogueExtractor:
     attribution, and structured output generation with checkpoint-based
     resume support.
     """
+
+    # Common speaker names that appear as first word in dialog text
+    KNOWN_SPEAKERS = {"旁白", "系统", "舰长", "姬子", "琪亚娜", "芽衣", "布洛妮娅", "德丽莎", "符华"}
 
     def __init__(
         self,
@@ -213,6 +248,8 @@ class DialogueExtractor:
         review_count = 0
         last_log_time = start_time
         last_event_timestamp = start_time
+        # Track the last frame for speaker extraction on finalization
+        last_frame = None
 
         print(f"[start] Processing {self.video_path.name} at {self.target_fps} fps")
 
@@ -230,6 +267,8 @@ class DialogueExtractor:
                     target_fps=self.target_fps,
                     start_time=start_time,
                 ):
+                    last_frame = frame
+
                     # Crop dialog_box ROI for event detection
                     dialog_crop = vp.crop_roi(frame, "dialog_box")
                     if dialog_crop is None:
@@ -242,9 +281,13 @@ class DialogueExtractor:
                         event_count += 1
                         last_event_timestamp = timestamp
 
-                        # Crop name_box from the full frame for speaker attribution
+                        # Try speaker from name box first
                         name_crop = vp.crop_roi(frame, "name_box")
                         speaker, speaker_conf = speaker_extractor.extract_speaker(name_crop)
+
+                        # If no speaker from name box, try parsing from dialog text
+                        if speaker is None:
+                            speaker, speaker_conf = _parse_speaker_from_text(finalized_event)
 
                         # Build provenance
                         provenance = {"source_file": str(self.video_path)}
@@ -291,10 +334,13 @@ class DialogueExtractor:
                     event_count += 1
 
                     name_crop = vp.crop_roi(
-                        vp.extract_frame_at(final_event.start_timestamp) or Image.new("RGB", (1, 1)),
+                        last_frame or Image.new("RGB", (1, 1)),
                         "name_box",
                     )
                     speaker, speaker_conf = speaker_extractor.extract_speaker(name_crop)
+
+                    if speaker is None:
+                        speaker, speaker_conf = _parse_speaker_from_text(final_event)
 
                     provenance = {"source_file": str(self.video_path)}
 
