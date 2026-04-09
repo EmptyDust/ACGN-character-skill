@@ -7,7 +7,7 @@ Handles speaker identification from name box OCR, including:
 - Special speaker detection (narrator, system, unknown)
 """
 
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, List, Set
 from PIL import Image
 
 
@@ -34,6 +34,7 @@ class SpeakerExtractor:
         confidence_threshold: float = 0.5,
         inherit_speaker: bool = True,
         special_speakers: Optional[Dict[str, str]] = None,
+        speaker_aliases: Optional[Dict[str, List[str]]] = None,
     ):
         """
         Initialize speaker extractor.
@@ -43,19 +44,48 @@ class SpeakerExtractor:
             confidence_threshold: 名字框 OCR 最低置信度
             inherit_speaker: 是否启用说话人继承
             special_speakers: 特殊说话人映射表，None 则使用默认映射
+            speaker_aliases: 说话人别名映射，canonical name -> list of aliases
         """
         self.ocr_func = ocr_func
         self.confidence_threshold = confidence_threshold
         self.inherit_speaker = inherit_speaker
         self.special_speakers = special_speakers if special_speakers is not None else DEFAULT_SPECIAL_SPEAKERS.copy()
 
+        # 构建 alias -> canonical 反向映射
+        self._alias_to_canonical: Dict[str, str] = {}
+        if speaker_aliases:
+            for canonical, aliases in speaker_aliases.items():
+                for alias in aliases:
+                    self._alias_to_canonical[alias] = canonical
+
+        # 构建已知说话人全集（canonical names + aliases + special speakers）
+        self._known_speakers: Set[str] = set()
+        self._known_speakers.update(self.special_speakers.keys())
+        if speaker_aliases:
+            self._known_speakers.update(speaker_aliases.keys())
+            for aliases in speaker_aliases.values():
+                self._known_speakers.update(aliases)
+
         # 状态
         self._last_speaker: Optional[str] = None
         self._last_confidence: float = 0.0
 
+    @property
+    def known_speakers(self) -> Set[str]:
+        """返回所有已知说话人集合（canonical + aliases + special speakers）。"""
+        return self._known_speakers
+
+    def normalize_speaker(self, name: str) -> str:
+        """将说话人名归一化：先查 special_speakers，再查 alias 映射，否则原样返回。"""
+        if name in self.special_speakers:
+            return self.special_speakers[name]
+        if name in self._alias_to_canonical:
+            return self._alias_to_canonical[name]
+        return name
+
     def _normalize_speaker(self, name: str) -> str:
-        """将特殊说话人名映射为归一化标签，普通名字原样返回。"""
-        return self.special_speakers.get(name, name)
+        """内部归一化，用于 extract_speaker 流程。"""
+        return self.normalize_speaker(name)
 
     def extract_speaker(
         self, name_box_crop: Optional[Image.Image]

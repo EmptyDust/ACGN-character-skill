@@ -9,7 +9,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List, Set
 from PIL import Image
 
 
@@ -102,14 +102,14 @@ def _create_rapidocr():
     return ocr_func
 
 
-def _parse_speaker_from_text(event) -> tuple:
+def _parse_speaker_from_text(event, known_speakers: Set[str]) -> tuple:
     """
     Parse speaker name from the beginning of dialog text.
 
     In many visual novels, the OCR captures the speaker name as the first
     word/line in the dialog box (e.g., "舰长 啊啊，异世界真好啊。").
-    Only splits when the candidate matches KNOWN_SPEAKERS or special speakers
-    to avoid false positives from ordinary dialog openings.
+    Only splits when the candidate matches known_speakers to avoid false
+    positives from ordinary dialog openings.
 
     Returns:
         (speaker, confidence) or (None, 0.0) if no speaker found
@@ -128,11 +128,7 @@ def _parse_speaker_from_text(event) -> tuple:
         if not remaining:
             return (None, 0.0)
 
-        # Only accept if candidate is a known speaker or special speaker
-        is_known = candidate in DialogueExtractor.KNOWN_SPEAKERS
-        is_special = candidate in DEFAULT_SPECIAL_SPEAKERS
-
-        if is_known or is_special:
+        if candidate in known_speakers:
             event.text = remaining
             speaker = DEFAULT_SPECIAL_SPEAKERS.get(candidate, candidate)
             return (speaker, event.confidence)
@@ -149,9 +145,6 @@ class DialogueExtractor:
     resume support.
     """
 
-    # Common speaker names that appear as first word in dialog text
-    KNOWN_SPEAKERS = {"旁白", "系统", "舰长", "姬子", "琪亚娜", "芽衣", "布洛妮娅", "德丽莎", "符华"}
-
     def __init__(
         self,
         video_path: Path,
@@ -162,6 +155,7 @@ class DialogueExtractor:
         review_threshold: float = 0.7,
         save_crops: bool = False,
         resume: bool = True,
+        speaker_aliases: Optional[Dict[str, List[str]]] = None,
     ):
         self.video_path = Path(video_path)
         self.roi_config_path = Path(roi_config_path)
@@ -171,6 +165,7 @@ class DialogueExtractor:
         self.review_threshold = review_threshold
         self.save_crops = save_crops
         self.resume = resume
+        self.speaker_aliases = speaker_aliases
 
         if not self.video_path.exists():
             raise FileNotFoundError(f"Video not found: {self.video_path}")
@@ -289,7 +284,8 @@ class DialogueExtractor:
         # Initialize components
         event_detector = EventDetector(ocr_func)
         event_detector.event_counter = event_count
-        speaker_extractor = SpeakerExtractor(ocr_func)
+        speaker_extractor = SpeakerExtractor(ocr_func, speaker_aliases=self.speaker_aliases)
+        known_speakers = speaker_extractor.known_speakers
 
         review_count = 0
         last_log_time = start_time
@@ -336,7 +332,7 @@ class DialogueExtractor:
 
                         # If no speaker from name box, try parsing from dialog text
                         if speaker is None:
-                            speaker, speaker_conf = _parse_speaker_from_text(finalized_event)
+                            speaker, speaker_conf = _parse_speaker_from_text(finalized_event, known_speakers)
 
                         # Reset cache for next event
                         cached_speaker = None
@@ -420,7 +416,7 @@ class DialogueExtractor:
                     speaker_conf = cached_speaker_conf
 
                     if speaker is None:
-                        speaker, speaker_conf = _parse_speaker_from_text(final_event)
+                        speaker, speaker_conf = _parse_speaker_from_text(final_event, known_speakers)
 
                     provenance = {"source_file": str(self.video_path)}
 
@@ -493,11 +489,96 @@ class DialogueExtractor:
         return summary
 
 
+class BatchRunner:
+    """Run dialogue extraction on multiple videos."""
+
+    def __init__(
+        self,
+        video_dir: Path,
+        roi_config_path: Path,
+        output_dir: Path,
+        ocr_engine: str = "paddleocr",
+        target_fps: float = 2.0,
+        video_pattern: str = "*.mp4",
+        review_threshold: float = 0.7,
+        save_crops: bool = False,
+        resume: bool = True,
+        speaker_aliases: Optional[Dict[str, List[str]]] = None,
+    ):
+        self.video_dir = Path(video_dir)
+        self.roi_config_path = Path(roi_config_path)
+        self.output_dir = Path(output_dir)
+        self.ocr_engine = ocr_engine
+        self.target_fps = target_fps
+        self.video_pattern = video_pattern
+        self.review_threshold = review_threshold
+        self.save_crops = save_crops
+        self.resume = resume
+        self.speaker_aliases = speaker_aliases
+
+        if not self.video_dir.is_dir():
+            raise FileNotFoundError(f"Video directory not found: {self.video_dir}")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def run(self) -> List[Dict[str, Any]]:
+        """Process all videos, return list of per-video summaries."""
+        videos = sorted(self.video_dir.glob(self.video_pattern))
+        if not videos:
+            print(f"[batch] No videos matching '{self.video_pattern}' in {self.video_dir}")
+            return []
+
+        total = len(videos)
+        print(f"[batch] Found {total} video(s) in {self.video_dir}")
+        summaries: List[Dict[str, Any]] = []
+        failed = 0
+
+        for idx, video_path in enumerate(videos, 1):
+            print(f"\nProcessing video {idx}/{total}: {video_path.name}")
+            video_output = self.output_dir / video_path.stem
+            try:
+                extractor = DialogueExtractor(
+                    video_path=video_path,
+                    roi_config_path=self.roi_config_path,
+                    output_dir=video_output,
+                    ocr_engine=self.ocr_engine,
+                    target_fps=self.target_fps,
+                    review_threshold=self.review_threshold,
+                    save_crops=self.save_crops,
+                    resume=self.resume,
+                    speaker_aliases=self.speaker_aliases,
+                )
+                summary = extractor.run()
+                summary["video"] = str(video_path)
+                summary["status"] = "ok"
+                summaries.append(summary)
+            except Exception as e:
+                print(f"[batch] FAILED {video_path.name}: {e}")
+                failed += 1
+                summaries.append({
+                    "video": str(video_path),
+                    "status": "error",
+                    "error": str(e),
+                })
+
+        # Write batch summary
+        batch_summary = {
+            "total_videos": total,
+            "succeeded": total - failed,
+            "failed": failed,
+            "videos": summaries,
+        }
+        summary_path = self.output_dir / "batch_summary.json"
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(batch_summary, f, ensure_ascii=False, indent=2)
+        print(f"\n[batch] Done. {total - failed}/{total} succeeded. Summary: {summary_path}")
+        return summaries
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Extract dialogue events from video using OCR"
     )
-    parser.add_argument("video_path", type=Path, help="Path to video file")
+    parser.add_argument("video_path", type=Path, help="Path to video file (or directory with --batch)")
     parser.add_argument("roi_config", type=Path, help="Path to ROI config YAML")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory (default: same as video)")
     parser.add_argument("--ocr-engine", type=str, default="paddleocr", choices=["paddleocr", "easyocr", "rapidocr"], help="OCR engine to use")
@@ -505,30 +586,46 @@ if __name__ == "__main__":
     parser.add_argument("--save-crops", action="store_true", help="Save ROI crops for review")
     parser.add_argument("--no-resume", action="store_true", help="Disable checkpoint resume")
     parser.add_argument("--review-threshold", type=float, default=0.7, help="Confidence threshold for review flagging")
+    parser.add_argument("--batch", action="store_true", help="Treat video_path as a directory and process all matching videos")
+    parser.add_argument("--video-pattern", type=str, default="*.mp4", help="Glob pattern for video files in batch mode (default: *.mp4)")
 
     args = parser.parse_args()
 
     output_dir = args.output_dir or args.video_path.parent / "output"
 
     try:
-        extractor = DialogueExtractor(
-            video_path=args.video_path,
-            roi_config_path=args.roi_config,
-            output_dir=output_dir,
-            ocr_engine=args.ocr_engine,
-            target_fps=args.fps,
-            review_threshold=args.review_threshold,
-            save_crops=args.save_crops,
-            resume=not args.no_resume,
-        )
-        summary = extractor.run()
+        if args.batch:
+            runner = BatchRunner(
+                video_dir=args.video_path,
+                roi_config_path=args.roi_config,
+                output_dir=output_dir,
+                ocr_engine=args.ocr_engine,
+                target_fps=args.fps,
+                video_pattern=args.video_pattern,
+                review_threshold=args.review_threshold,
+                save_crops=args.save_crops,
+                resume=not args.no_resume,
+            )
+            runner.run()
+        else:
+            extractor = DialogueExtractor(
+                video_path=args.video_path,
+                roi_config_path=args.roi_config,
+                output_dir=output_dir,
+                ocr_engine=args.ocr_engine,
+                target_fps=args.fps,
+                review_threshold=args.review_threshold,
+                save_crops=args.save_crops,
+                resume=not args.no_resume,
+            )
+            summary = extractor.run()
 
-        print(f"\nSummary:")
-        print(f"  Total events: {summary['total_events']}")
-        print(f"  Review flagged: {summary['review_count']}")
-        print(f"  Duration: {summary['duration_processed']:.1f}s")
-        print(f"  JSONL: {summary['jsonl_path']}")
-        print(f"  Text: {summary['text_path']}")
+            print(f"\nSummary:")
+            print(f"  Total events: {summary['total_events']}")
+            print(f"  Review flagged: {summary['review_count']}")
+            print(f"  Duration: {summary['duration_processed']:.1f}s")
+            print(f"  JSONL: {summary['jsonl_path']}")
+            print(f"  Text: {summary['text_path']}")
 
     except FileNotFoundError as e:
         print(f"Error: {e}")
