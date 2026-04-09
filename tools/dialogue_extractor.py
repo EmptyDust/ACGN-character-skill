@@ -1,0 +1,382 @@
+"""
+Dialogue Extraction Pipeline
+
+Ties together VideoProcessor, EventDetector, SpeakerExtractor, and output
+formatters into a complete batch processing pipeline with resume support.
+"""
+
+import json
+import time
+import argparse
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+from PIL import Image
+
+
+def create_ocr_func(engine: str) -> Callable[[Image.Image], tuple[str, float]]:
+    """
+    Create an OCR function for the specified engine.
+
+    Args:
+        engine: OCR engine name ("paddleocr", "easyocr", "rapidocr")
+
+    Returns:
+        Callable that takes a PIL Image and returns (text, confidence)
+    """
+    if engine == "paddleocr":
+        return _create_paddleocr()
+    elif engine == "easyocr":
+        return _create_easyocr()
+    elif engine == "rapidocr":
+        return _create_rapidocr()
+    else:
+        raise ValueError(f"Unknown OCR engine: {engine}. Supported: paddleocr, easyocr, rapidocr")
+
+
+def _create_paddleocr():
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError:
+        raise ImportError("PaddleOCR not installed. Run: pip install paddleocr")
+
+    ocr = PaddleOCR(use_textline_orientation=True, lang="ch")
+
+    def ocr_func(image: Image.Image) -> tuple[str, float]:
+        import numpy as np
+        img_array = np.array(image)
+        result = ocr.ocr(img_array, cls=True)
+        if result and result[0]:
+            texts = []
+            confidences = []
+            for line in result[0]:
+                texts.append(line[1][0])
+                confidences.append(line[1][1])
+            return (" ".join(texts), sum(confidences) / len(confidences))
+        return ("", 0.0)
+
+    return ocr_func
+
+
+def _create_easyocr():
+    try:
+        import easyocr
+    except ImportError:
+        raise ImportError("EasyOCR not installed. Run: pip install easyocr")
+
+    reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
+
+    def ocr_func(image: Image.Image) -> tuple[str, float]:
+        import numpy as np
+        img_array = np.array(image)
+        results = reader.readtext(img_array)
+        if results:
+            texts = [r[1] for r in results]
+            confidences = [r[2] for r in results]
+            return (" ".join(texts), sum(confidences) / len(confidences))
+        return ("", 0.0)
+
+    return ocr_func
+
+
+def _create_rapidocr():
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        raise ImportError("RapidOCR not installed. Run: pip install rapidocr-onnxruntime")
+
+    ocr = RapidOCR()
+
+    def ocr_func(image: Image.Image) -> tuple[str, float]:
+        import numpy as np
+        img_array = np.array(image)
+        result, _ = ocr(img_array)
+        if result:
+            texts = [r[1] for r in result]
+            confidences = [r[2] for r in result]
+            return (" ".join(texts), sum(confidences) / len(confidences))
+        return ("", 0.0)
+
+    return ocr_func
+
+
+class DialogueExtractor:
+    """
+    Main dialogue extraction pipeline.
+
+    Orchestrates video processing, OCR-based event detection, speaker
+    attribution, and structured output generation with checkpoint-based
+    resume support.
+    """
+
+    def __init__(
+        self,
+        video_path: Path,
+        roi_config_path: Path,
+        output_dir: Path,
+        ocr_engine: str = "paddleocr",
+        target_fps: float = 2.0,
+        review_threshold: float = 0.7,
+        save_crops: bool = False,
+        resume: bool = True,
+    ):
+        self.video_path = Path(video_path)
+        self.roi_config_path = Path(roi_config_path)
+        self.output_dir = Path(output_dir)
+        self.ocr_engine = ocr_engine
+        self.target_fps = target_fps
+        self.review_threshold = review_threshold
+        self.save_crops = save_crops
+        self.resume = resume
+
+        if not self.video_path.exists():
+            raise FileNotFoundError(f"Video not found: {self.video_path}")
+        if not self.roi_config_path.exists():
+            raise FileNotFoundError(f"ROI config not found: {self.roi_config_path}")
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.video_id = self.video_path.stem
+        self.jsonl_path = self.output_dir / f"{self.video_id}.jsonl"
+        self.text_path = self.output_dir / f"{self.video_id}.txt"
+        self.checkpoint_path = self.output_dir / "checkpoint.json"
+        self.crops_dir = self.output_dir / "crops"
+
+        if self.save_crops:
+            self.crops_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Load checkpoint if it exists and matches current video."""
+        if not self.resume or not self.checkpoint_path.exists():
+            return None
+
+        try:
+            with open(self.checkpoint_path, "r", encoding="utf-8") as f:
+                checkpoint = json.load(f)
+            if checkpoint.get("video_path") == str(self.video_path):
+                return checkpoint
+            print(f"[checkpoint] Video mismatch, starting fresh")
+            return None
+        except (json.JSONDecodeError, KeyError):
+            return None
+
+    def _save_checkpoint(self, timestamp: float, event_count: int):
+        """Save processing checkpoint."""
+        checkpoint = {
+            "video_path": str(self.video_path),
+            "last_processed_timestamp": timestamp,
+            "event_count": event_count,
+        }
+        with open(self.checkpoint_path, "w", encoding="utf-8") as f:
+            json.dump(checkpoint, f, ensure_ascii=False)
+
+    def _delete_checkpoint(self):
+        """Remove checkpoint file after successful completion."""
+        if self.checkpoint_path.exists():
+            self.checkpoint_path.unlink()
+
+    def run(self) -> Dict[str, Any]:
+        """
+        Run the complete extraction pipeline.
+
+        Returns:
+            Summary dict with total_events, review_count, duration_processed
+        """
+        from tools.video_processor import VideoProcessor
+        from tools.event_detector import EventDetector
+        from tools.speaker_extractor import SpeakerExtractor
+        from tools.output_formatter import JSONLWriter
+        from tools.text_output import convert_jsonl_to_text
+
+        # Initialize OCR
+        print(f"[init] Loading OCR engine: {self.ocr_engine}")
+        ocr_func = create_ocr_func(self.ocr_engine)
+
+        # Check for resume
+        checkpoint = self._load_checkpoint()
+        start_time = 0.0
+        event_count = 0
+        file_mode = "w"
+
+        if checkpoint:
+            start_time = checkpoint["last_processed_timestamp"]
+            event_count = checkpoint["event_count"]
+            file_mode = "a"
+            print(f"[resume] Resuming from {start_time:.1f}s, {event_count} events already processed")
+
+        # Initialize components
+        event_detector = EventDetector(ocr_func)
+        event_detector.event_counter = event_count
+        speaker_extractor = SpeakerExtractor(ocr_func)
+
+        review_count = 0
+        last_log_time = start_time
+        last_event_timestamp = start_time
+
+        print(f"[start] Processing {self.video_path.name} at {self.target_fps} fps")
+
+        with VideoProcessor(self.video_path, self.roi_config_path) as vp:
+            duration = vp.duration
+            print(f"[info] Video duration: {duration:.1f}s, resolution: {vp.resolution[0]}x{vp.resolution[1]}")
+
+            # Open JSONL writer manually to control file mode
+            jsonl_file = open(self.jsonl_path, file_mode, encoding="utf-8")
+            writer = JSONLWriter(self.jsonl_path, self.video_id, self.review_threshold)
+            writer._file = jsonl_file
+
+            try:
+                for timestamp, frame in vp.extract_frames(
+                    target_fps=self.target_fps,
+                    start_time=start_time,
+                ):
+                    # Crop dialog_box ROI for event detection
+                    dialog_crop = vp.crop_roi(frame, "dialog_box")
+                    if dialog_crop is None:
+                        continue
+
+                    # Feed to event detector
+                    finalized_event = event_detector.process_frame(dialog_crop, timestamp)
+
+                    if finalized_event:
+                        event_count += 1
+                        last_event_timestamp = timestamp
+
+                        # Crop name_box from the full frame for speaker attribution
+                        name_crop = vp.crop_roi(frame, "name_box")
+                        speaker, speaker_conf = speaker_extractor.extract_speaker(name_crop)
+
+                        # Build provenance
+                        provenance = {"source_file": str(self.video_path)}
+
+                        # Optionally save crops
+                        if self.save_crops:
+                            crop_name = f"{finalized_event.event_id}_dialog.png"
+                            dialog_crop.save(self.crops_dir / crop_name)
+                            provenance["roi_crop_file"] = crop_name
+                            if name_crop is not None:
+                                name_crop_name = f"{finalized_event.event_id}_name.png"
+                                name_crop.save(self.crops_dir / name_crop_name)
+
+                        # Write event
+                        writer.write_event(
+                            finalized_event,
+                            speaker=speaker,
+                            speaker_confidence=speaker_conf,
+                            provenance=provenance,
+                        )
+
+                        # Track review count
+                        min_conf = min(finalized_event.confidence, speaker_conf) if speaker else finalized_event.confidence
+                        if min_conf < self.review_threshold:
+                            review_count += 1
+
+                        # Save checkpoint
+                        self._save_checkpoint(timestamp, event_count)
+
+                        # Log event
+                        speaker_str = speaker or "?"
+                        text_preview = finalized_event.text[:30] + ("..." if len(finalized_event.text) > 30 else "")
+                        print(f"  [{finalized_event.event_id}] {speaker_str}: {text_preview}")
+
+                    # Progress logging every 30 seconds of video
+                    if timestamp - last_log_time >= 30.0:
+                        progress = (timestamp / duration * 100) if duration > 0 else 0
+                        print(f"[progress] {timestamp:.1f}s / {duration:.1f}s ({progress:.0f}%), events: {event_count}")
+                        last_log_time = timestamp
+
+                # Flush remaining event at end of video
+                final_event = event_detector.flush(duration)
+                if final_event:
+                    event_count += 1
+
+                    name_crop = vp.crop_roi(
+                        vp.extract_frame_at(final_event.start_timestamp) or Image.new("RGB", (1, 1)),
+                        "name_box",
+                    )
+                    speaker, speaker_conf = speaker_extractor.extract_speaker(name_crop)
+
+                    provenance = {"source_file": str(self.video_path)}
+
+                    writer.write_event(
+                        final_event,
+                        speaker=speaker,
+                        speaker_confidence=speaker_conf,
+                        provenance=provenance,
+                    )
+
+                    min_conf = min(final_event.confidence, speaker_conf) if speaker else final_event.confidence
+                    if min_conf < self.review_threshold:
+                        review_count += 1
+
+                    speaker_str = speaker or "?"
+                    text_preview = final_event.text[:30] + ("..." if len(final_event.text) > 30 else "")
+                    print(f"  [{final_event.event_id}] {speaker_str}: {text_preview}")
+
+            finally:
+                jsonl_file.close()
+
+        # Convert JSONL to plain text
+        if self.jsonl_path.exists():
+            convert_jsonl_to_text(self.jsonl_path, self.text_path)
+            print(f"[output] Text output: {self.text_path}")
+
+        # Clean up checkpoint on successful completion
+        self._delete_checkpoint()
+
+        summary = {
+            "total_events": event_count,
+            "review_count": review_count,
+            "duration_processed": duration,
+            "jsonl_path": str(self.jsonl_path),
+            "text_path": str(self.text_path),
+        }
+
+        print(f"[done] {event_count} events extracted, {review_count} flagged for review")
+        return summary
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Extract dialogue events from video using OCR"
+    )
+    parser.add_argument("video_path", type=Path, help="Path to video file")
+    parser.add_argument("roi_config", type=Path, help="Path to ROI config YAML")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory (default: same as video)")
+    parser.add_argument("--ocr-engine", type=str, default="paddleocr", choices=["paddleocr", "easyocr", "rapidocr"], help="OCR engine to use")
+    parser.add_argument("--fps", type=float, default=2.0, help="Target FPS for frame sampling")
+    parser.add_argument("--save-crops", action="store_true", help="Save ROI crops for review")
+    parser.add_argument("--no-resume", action="store_true", help="Disable checkpoint resume")
+    parser.add_argument("--review-threshold", type=float, default=0.7, help="Confidence threshold for review flagging")
+
+    args = parser.parse_args()
+
+    output_dir = args.output_dir or args.video_path.parent / "output"
+
+    try:
+        extractor = DialogueExtractor(
+            video_path=args.video_path,
+            roi_config_path=args.roi_config,
+            output_dir=output_dir,
+            ocr_engine=args.ocr_engine,
+            target_fps=args.fps,
+            review_threshold=args.review_threshold,
+            save_crops=args.save_crops,
+            resume=not args.no_resume,
+        )
+        summary = extractor.run()
+
+        print(f"\nSummary:")
+        print(f"  Total events: {summary['total_events']}")
+        print(f"  Review flagged: {summary['review_count']}")
+        print(f"  Duration: {summary['duration_processed']:.1f}s")
+        print(f"  JSONL: {summary['jsonl_path']}")
+        print(f"  Text: {summary['text_path']}")
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        exit(1)
+    except ImportError as e:
+        print(f"Error: {e}")
+        exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        raise
