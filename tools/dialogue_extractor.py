@@ -34,6 +34,8 @@ def create_ocr_func(engine: str) -> Callable[[Image.Image], tuple[str, float]]:
 
 
 def _create_paddleocr():
+    import os
+    os.environ.setdefault('FLAGS_call_stack_level', '2')
     try:
         from paddleocr import PaddleOCR
     except ImportError:
