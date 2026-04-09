@@ -182,6 +182,7 @@ class EventDetector:
 
             if self.current_event.stable_frames >= self.stable_frames_threshold:
                 self.current_event.state = EventState.STABLE
+                return self._finalize_event(timestamp)
 
         return None
 

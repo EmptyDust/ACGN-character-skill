@@ -203,12 +203,13 @@ class DialogueExtractor:
         except (json.JSONDecodeError, KeyError):
             return None
 
-    def _save_checkpoint(self, timestamp: float, event_count: int):
+    def _save_checkpoint(self, timestamp: float, event_count: int, last_event_id: str = ""):
         """Save processing checkpoint."""
         checkpoint = {
             "video_path": str(self.video_path),
             "last_processed_timestamp": timestamp,
             "event_count": event_count,
+            "last_event_id": last_event_id,
         }
         with open(self.checkpoint_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint, f, ensure_ascii=False)
@@ -217,6 +218,29 @@ class DialogueExtractor:
         """Remove checkpoint file after successful completion."""
         if self.checkpoint_path.exists():
             self.checkpoint_path.unlink()
+
+    def _read_existing_jsonl(self) -> tuple:
+        """Read existing JSONL to get last event_id and event count for resume.
+
+        Returns:
+            (last_event_id, event_count) from existing file, or ("", 0) if empty/missing.
+        """
+        if not self.jsonl_path.exists():
+            return ("", 0)
+        last_event_id = ""
+        count = 0
+        try:
+            with open(self.jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    last_event_id = data.get("event_id", "")
+                    count += 1
+        except (json.JSONDecodeError, OSError):
+            return ("", 0)
+        return (last_event_id, count)
 
     def run(self) -> Dict[str, Any]:
         """
@@ -239,13 +263,28 @@ class DialogueExtractor:
         checkpoint = self._load_checkpoint()
         start_time = 0.0
         event_count = 0
+        file_mode = "w"
 
         if checkpoint:
-            # Resume is only safe when starting fresh from a known-good timestamp.
-            # We restart the JSONL file to avoid duplicate/split events.
             start_time = checkpoint["last_processed_timestamp"]
-            event_count = 0  # Reset count since we overwrite the file
-            print(f"[resume] Restarting from {start_time:.1f}s (overwriting previous output)")
+            # Read existing JSONL to get accurate count and last event_id for dedupe
+            existing_last_id, existing_count = self._read_existing_jsonl()
+            checkpoint_last_id = checkpoint.get("last_event_id", "")
+            # Verify dedupe: checkpoint's last_event_id must match JSONL's last event
+            if existing_count > 0 and checkpoint_last_id and existing_last_id == checkpoint_last_id:
+                event_count = existing_count
+                file_mode = "a"
+                print(f"[resume] Appending from {start_time:.1f}s, {event_count} existing events (last: {existing_last_id})")
+            elif existing_count > 0 and checkpoint_last_id and existing_last_id != checkpoint_last_id:
+                # Mismatch: JSONL and checkpoint are out of sync, restart from checkpoint
+                event_count = 0
+                file_mode = "w"
+                print(f"[resume] Dedupe mismatch (checkpoint={checkpoint_last_id}, jsonl={existing_last_id}), overwriting from {start_time:.1f}s")
+            else:
+                # No checkpoint last_event_id or empty JSONL - safe to append if file exists
+                event_count = existing_count
+                file_mode = "a" if existing_count > 0 else "w"
+                print(f"[resume] Resuming from {start_time:.1f}s, {event_count} existing events")
 
         # Initialize components
         event_detector = EventDetector(ocr_func)
@@ -267,8 +306,8 @@ class DialogueExtractor:
             duration = vp.duration
             print(f"[info] Video duration: {duration:.1f}s, resolution: {vp.resolution[0]}x{vp.resolution[1]}")
 
-            # Open JSONL writer - always write mode (resume restarts from checkpoint)
-            jsonl_file = open(self.jsonl_path, "w", encoding="utf-8")
+            # Open JSONL writer - append mode on resume, write mode on fresh start
+            jsonl_file = open(self.jsonl_path, file_mode, encoding="utf-8")
             writer = JSONLWriter(self.jsonl_path, self.video_id, self.review_threshold)
             writer._file = jsonl_file
 
@@ -306,8 +345,13 @@ class DialogueExtractor:
                         # Build provenance
                         provenance = {"source_file": str(self.video_path)}
 
-                        # Optionally save crops
-                        if self.save_crops:
+                        # Determine review_required early for provenance saving
+                        min_conf = min(finalized_event.confidence, speaker_conf) if speaker else finalized_event.confidence
+                        is_review = min_conf < self.review_threshold or speaker is None
+
+                        # Save crops: always for flagged events, optionally for all
+                        if self.save_crops or is_review:
+                            self.crops_dir.mkdir(parents=True, exist_ok=True)
                             crop_name = f"{finalized_event.event_id}_dialog.png"
                             dialog_crop.save(self.crops_dir / crop_name)
                             provenance["roi_crop_file"] = crop_name
@@ -316,21 +360,34 @@ class DialogueExtractor:
                                 name_crop_name = f"{finalized_event.event_id}_name.png"
                                 save_name_crop.save(self.crops_dir / name_crop_name)
 
+                        # Save full frame for flagged events
+                        if is_review:
+                            self.crops_dir.mkdir(parents=True, exist_ok=True)
+                            frame_name = f"{finalized_event.event_id}_frame.png"
+                            frame.save(self.crops_dir / frame_name)
+                            provenance["frame_file"] = frame_name
+
+                        # Build ocr_candidates from event history
+                        ocr_candidates = [
+                            {"text": t, "confidence": c}
+                            for t, c in zip(finalized_event.text_history, finalized_event.confidence_history)
+                        ] if finalized_event.text_history else None
+
                         # Write event
                         writer.write_event(
                             finalized_event,
                             speaker=speaker,
                             speaker_confidence=speaker_conf,
                             provenance=provenance,
+                            ocr_candidates=ocr_candidates,
                         )
 
                         # Track review count (must match JSONL review_required logic)
-                        min_conf = min(finalized_event.confidence, speaker_conf) if speaker else finalized_event.confidence
-                        if min_conf < self.review_threshold or speaker is None:
+                        if is_review:
                             review_count += 1
 
                         # Save checkpoint
-                        self._save_checkpoint(timestamp, event_count)
+                        self._save_checkpoint(timestamp, event_count, finalized_event.event_id)
 
                         # Log event
                         speaker_str = speaker or "?"
@@ -367,15 +424,46 @@ class DialogueExtractor:
 
                     provenance = {"source_file": str(self.video_path)}
 
+                    # Determine review_required early for provenance saving
+                    min_conf = min(final_event.confidence, speaker_conf) if speaker else final_event.confidence
+                    is_review = min_conf < self.review_threshold or speaker is None
+
+                    # Save crops for flagged events
+                    if self.save_crops or is_review:
+                        self.crops_dir.mkdir(parents=True, exist_ok=True)
+                        if last_frame is not None:
+                            dialog_crop_final = vp.crop_roi(last_frame, "dialog_box")
+                            if dialog_crop_final is not None:
+                                crop_name = f"{final_event.event_id}_dialog.png"
+                                dialog_crop_final.save(self.crops_dir / crop_name)
+                                provenance["roi_crop_file"] = crop_name
+                            save_name_crop = vp.crop_roi(last_frame, "name_box")
+                            if save_name_crop is not None:
+                                name_crop_name = f"{final_event.event_id}_name.png"
+                                save_name_crop.save(self.crops_dir / name_crop_name)
+
+                    # Save full frame for flagged events
+                    if is_review and last_frame is not None:
+                        self.crops_dir.mkdir(parents=True, exist_ok=True)
+                        frame_name = f"{final_event.event_id}_frame.png"
+                        last_frame.save(self.crops_dir / frame_name)
+                        provenance["frame_file"] = frame_name
+
+                    # Build ocr_candidates from event history
+                    ocr_candidates = [
+                        {"text": t, "confidence": c}
+                        for t, c in zip(final_event.text_history, final_event.confidence_history)
+                    ] if final_event.text_history else None
+
                     writer.write_event(
                         final_event,
                         speaker=speaker,
                         speaker_confidence=speaker_conf,
                         provenance=provenance,
+                        ocr_candidates=ocr_candidates,
                     )
 
-                    min_conf = min(final_event.confidence, speaker_conf) if speaker else final_event.confidence
-                    if min_conf < self.review_threshold or speaker is None:
+                    if is_review:
                         review_count += 1
 
                     speaker_str = speaker or "?"

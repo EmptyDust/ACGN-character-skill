@@ -6,9 +6,10 @@ and manual review. Supports provenance tracking for artifact traceability.
 """
 
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass, asdict, field
+from typing import Optional, List, Dict
 import json
+import re
 
 from tools.event_detector import DialogueEvent
 
@@ -28,6 +29,32 @@ class DialogueEventOutput:
     source_file: Optional[str] = None
     frame_file: Optional[str] = None
     roi_crop_file: Optional[str] = None
+    ocr_candidates: Optional[List[Dict[str, object]]] = None
+
+
+def _check_text_quality(text: str) -> bool:
+    """Check text quality heuristics.
+
+    Returns True if text passes quality checks, False if it should be flagged
+    for review.
+    """
+    # Punctuation-only: reject if text contains only punctuation and whitespace
+    punct_pattern = r'^[\s（）。，、！？…""「」()\.\,\!\?\;\:\'\"\-\—\~\·]+$'
+    if re.match(punct_pattern, text):
+        return False
+
+    # Minimum content length: need at least 2 CJK or alphanumeric characters
+    content_chars = re.findall(r'[\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]', text)
+    if len(content_chars) < 2:
+        return False
+
+    # Unbalanced brackets
+    if text.count('（') != text.count('）'):
+        return False
+    if text.count('「') != text.count('」'):
+        return False
+
+    return True
 
 
 def event_to_output(
@@ -36,7 +63,8 @@ def event_to_output(
     speaker: Optional[str],
     speaker_confidence: float,
     review_threshold: float = 0.7,
-    provenance: Optional[dict] = None
+    provenance: Optional[dict] = None,
+    ocr_candidates: Optional[List[Dict[str, object]]] = None
 ) -> DialogueEventOutput:
     """
     Convert DialogueEvent to DialogueEventOutput.
@@ -48,6 +76,7 @@ def event_to_output(
         speaker_confidence: Speaker detection confidence
         review_threshold: Confidence threshold for review flag
         provenance: Optional dict with artifact paths (source_file, frame_file, roi_crop_file)
+        ocr_candidates: Optional list of dicts with text and confidence from OCR history
 
     Returns:
         DialogueEventOutput ready for JSONL serialization
@@ -56,6 +85,10 @@ def event_to_output(
     # Flag for review if: confidence below threshold OR speaker is missing
     min_confidence = min(event.confidence, speaker_confidence) if speaker else event.confidence
     review_required = min_confidence < review_threshold or speaker is None
+
+    # Text quality heuristics
+    if not _check_text_quality(event.text):
+        review_required = True
 
     # Convert timestamps from seconds to milliseconds
     start_ms = int(event.start_timestamp * 1000)
@@ -75,7 +108,8 @@ def event_to_output(
         review_required=review_required,
         source_file=prov.get("source_file"),
         frame_file=prov.get("frame_file"),
-        roi_crop_file=prov.get("roi_crop_file")
+        roi_crop_file=prov.get("roi_crop_file"),
+        ocr_candidates=ocr_candidates
     )
 
 
@@ -121,7 +155,8 @@ class JSONLWriter:
         event: DialogueEvent,
         speaker: Optional[str],
         speaker_confidence: float,
-        provenance: Optional[dict] = None
+        provenance: Optional[dict] = None,
+        ocr_candidates: Optional[List[Dict[str, object]]] = None
     ):
         """
         Write a dialogue event to JSONL file.
@@ -131,6 +166,7 @@ class JSONLWriter:
             speaker: Detected speaker name (None if unknown)
             speaker_confidence: Speaker detection confidence
             provenance: Optional dict with artifact paths
+            ocr_candidates: Optional list of dicts with text and confidence
         """
         if self._file is None:
             raise RuntimeError("Writer not opened. Use context manager or call __enter__().")
@@ -141,7 +177,8 @@ class JSONLWriter:
             speaker=speaker,
             speaker_confidence=speaker_confidence,
             review_threshold=self.review_threshold,
-            provenance=provenance
+            provenance=provenance,
+            ocr_candidates=ocr_candidates
         )
 
         # Write as single-line JSON
