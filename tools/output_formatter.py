@@ -162,7 +162,7 @@ class JSONLWriter:
         speaker_confidence: float,
         provenance: Optional[dict] = None,
         ocr_candidates: Optional[List[Dict[str, object]]] = None,
-    selection_reason: Optional[str] = None
+        selection_reason: Optional[str] = None
     ):
         """
         Write a dialogue event to JSONL file.
@@ -173,6 +173,7 @@ class JSONLWriter:
             speaker_confidence: Speaker detection confidence
             provenance: Optional dict with artifact paths
             ocr_candidates: Optional list of dicts with text and confidence
+            selection_reason: Optional reason for OCR engine selection
         """
         if self._file is None:
             raise RuntimeError("Writer not opened. Use context manager or call __enter__().")
@@ -184,7 +185,8 @@ class JSONLWriter:
             speaker_confidence=speaker_confidence,
             review_threshold=self.review_threshold,
             provenance=provenance,
-            ocr_candidates=ocr_candidates
+            ocr_candidates=ocr_candidates,
+            selection_reason=selection_reason
         )
 
         # Write as single-line JSON
