@@ -100,10 +100,10 @@ models/                         # Whisper 模型缓存（gitignored）
 
 ```bash
 # 安装角色创建器
-npx skills add your-username/ACGN-character-skill
+npx skills add AusertDream/yuexia-skill
 
 # 安装月下角色
-npx skills add your-username/ACGN-character-skill/tree/main/characters/yuexia
+npx skills add AusertDream/yuexia-skill/tree/main/characters/yuexia
 ```
 
 安装完成后，在 Claude Code 中：
