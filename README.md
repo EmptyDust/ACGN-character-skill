@@ -99,14 +99,11 @@ models/                         # Whisper 模型缓存（gitignored）
 ### 安装 Skill
 
 ```bash
-# 克隆仓库
-git clone https://github.com/your-username/ACGN-character-skill.git
+# 安装角色创建器
+npx skills add your-username/ACGN-character-skill
 
-# 安装角色创建器（全局）
-ln -s /path/to/ACGN-character-skill ~/.claude/skills/acgn-character-skill
-
-# 安装月下角色（全局）
-ln -s /path/to/ACGN-character-skill/characters/yuexia ~/.claude/skills/character-yuexia
+# 安装月下角色
+npx skills add your-username/ACGN-character-skill/tree/main/characters/yuexia
 ```
 
 安装完成后，在 Claude Code 中：
