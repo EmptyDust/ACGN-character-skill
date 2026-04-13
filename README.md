@@ -1,6 +1,6 @@
 <div align="center">
 
-# 月下.skill
+# ACGN-character-skill
 
 > *"吸血鬼不信神，也不信命运，但像这样出现在我面前的你，一定是我遇到过的最大的奇迹。"*
 
@@ -15,8 +15,9 @@
 <br>
 
 将虚构角色蒸馏成可对话的 AI Skill。<br>
-从游戏剧情视频中提取角色的故事设定与人格特征，<br>
-生成一个**用她的语气说话、以她的方式思考、带着她的情感回应**的角色扮演 Skill。
+从 ACGN 游戏剧情视频中提取角色的故事设定与人格特征，<br>
+生成一个**用她的语气说话、以她的方式思考、带着她的情感回应**的角色扮演 Skill。<br>
+内置 OCR 对话提取工具，支持无语音剧情视频的文本提取。
 
 本项目以崩坏3舰长线角色「月下」为首个实例，<br>
 架构参考 [colleague-skill](https://github.com/titanwings/colleague-skill) 的二层蒸馏方法，<br>
@@ -34,7 +35,7 @@
 
 colleague-skill 的核心思路是将一个真实同事的专业能力和人格特征分别提取、结构化，然后合并为一个可执行的 AI Skill。本项目将这一方法迁移到虚构角色领域：用视频转录替代聊天记录采集，用角色设定（Story）替代工作能力（Work），用适配后的5层人格模型捕捉角色的说话方式、情感模式和行为准则。
 
-整个流程：游戏剧情视频 → Whisper 语音转录 → 角色信息提取 → 结构化生成 → 可对话的角色 Skill。
+整个流程：游戏剧情视频 → OCR/Whisper 对话提取 → 角色信息提取 → 结构化生成 → 可对话的角色 Skill。
 
 ---
 
@@ -52,7 +53,20 @@ yuexia-skill/
 │   ├── merger.md               #   增量更新逻辑
 │   └── correction_handler.md   #   对话纠正处理
 ├── tools/
-│   └── video_transcriber.py    #   视频转录工具（Whisper + ffmpeg）
+│   ├── video_transcriber.py    #   视频转录工具（Whisper + ffmpeg）
+│   ├── dialogue_extractor.py   #   OCR 对话提取主入口
+│   ├── event_detector.py       #   对话事件检测状态机
+│   ├── ocr_engines.py          #   OCR 引擎封装
+│   ├── ocr_fusion.py           #   多引擎 OCR 融合
+│   ├── output_formatter.py     #   输出格式化与 review 标记
+│   ├── preprocessing.py        #   图像预处理
+│   ├── review_ui.py            #   低置信度事件 review UI
+│   ├── speaker_extractor.py    #   说话人识别
+│   ├── text_output.py          #   纯文本输出
+│   ├── video_processor.py      #   视频帧提取
+│   ├── work_config.py          #   per-work 配置加载
+│   └── configs/
+│       └── yuexia.yaml         #   月下 ROI 配置
 └── characters/
     └── yuexia/                 #   月下的生成产物
         ├── story.md            #     Part A — 角色设定
@@ -195,7 +209,7 @@ Live2D 来源：B站 [支线路人A](https://space.bilibili.com/1152374880)
 
 ## 视频转录
 
-项目使用 OpenAI Whisper large-v3 模型对游戏视频进行中文语音转录，模型从 ModelScope 下载。转录脚本位于 `tools/video_transcriber.py`，支持 GPU 加速、断点续传、自动查找 ffmpeg。
+项目使用 OpenAI Whisper large-v3 模型对游戏视频进行中文语音转录，模型从 ModelScope 下载。转录脚本位于 `yuexia-skill/tools/video_transcriber.py`，支持 GPU 加速、断点续传、自动查找 ffmpeg。
 
 运行方式（需要安装 openai-whisper 和 ffmpeg）：
 
