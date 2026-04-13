@@ -84,21 +84,18 @@ def event_to_output(
     Returns:
         DialogueEventOutput ready for JSONL serialization
     """
-    # Calculate review_required based on text and speaker confidence
-    # Flag for review if: confidence below threshold AND speaker is missing/unknown
+    # Calculate review_required based on confidence and speaker
     min_confidence = min(event.confidence, speaker_confidence) if speaker else event.confidence
-
-    # A speaker value like "[未知]" or "[旁白]" is still a valid speaker attribution
     has_speaker = speaker is not None and speaker != ""
-    review_required = min_confidence < review_threshold and not has_speaker
 
-    # Text quality heuristics — but skip for high-confidence events with known speaker
-    # UNLESS the text is genuinely truncated/garbled
+    # AC-6: Low-confidence events MUST be flagged regardless of speaker
+    review_required = min_confidence < review_threshold or not has_speaker
+
+    # Text quality heuristics — exempt high-confidence complete short utterances
     text_quality_ok = _check_text_quality(event.text)
     if not text_quality_ok:
         content_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]', event.text))
         text = event.text.strip()
-        # Check if text has balanced brackets and terminal punctuation — indicates complete thought
         has_terminal = text and text[-1] in '。！？）)～~…」』】'
         has_balanced = text.count('（') == text.count('）') and text.count('(') == text.count(')')
         is_complete_short = has_terminal and has_balanced and content_chars >= 1
