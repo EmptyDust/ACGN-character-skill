@@ -158,8 +158,19 @@ pip list 2>/dev/null | grep -iE "paddle|ocr|easyocr|rapidocr|tesseract"
 在跑 OCR 之前，先从每个视频抽取一帧样本截图（取第 30 秒或视频 10% 位置），自行查看判断所有视频的对话框 UI 布局是否一致：
 
 ```bash
-# 从每个视频抽取一帧样本
-ffmpeg -ss 30 -i "{video_path}" -frames:v 1 -q:v 2 "./{video_stem}_sample.png"
+# 从每个视频抽取一帧样本（使用 PyAV，已在 requirements.txt 中）
+python -c "
+import av, PIL.Image, numpy as np
+container = av.open('{video_path}')
+stream = container.streams.video[0]
+target_ts = 30  # 秒
+stream.seek(int(target_ts / stream.time_base))
+for frame in container.decode(video=0):
+    img = frame.to_image()
+    img.save('./{video_stem}_sample.png')
+    break
+container.close()
+"
 ```
 
 用 `Read` 工具查看所有样本截图，判断：
@@ -179,10 +190,17 @@ ffmpeg -ss 30 -i "{video_path}" -frames:v 1 -q:v 2 "./{video_stem}_sample.png"
 **ROI 精度验证**：创建或加载 ROI 配置后，必须用样本截图实际验证框选精度。用以下命令将 ROI 区域裁切出来：
 
 ```bash
-# 用 ffmpeg 按归一化坐标裁切 name 框和 dialogue 框
+# 用 Pillow 按归一化坐标裁切 name 框和 dialogue 框
 # 假设 name_roi=(x, y, w, h)，dialogue_roi=(x, y, w, h)，坐标均为 0-1 归一化值
-ffmpeg -i "./{video_stem}_sample.png" -vf "crop=iw*{name_w}:ih*{name_h}:iw*{name_x}:ih*{name_y}" "./{video_stem}_name_crop.png"
-ffmpeg -i "./{video_stem}_sample.png" -vf "crop=iw*{dialogue_w}:ih*{dialogue_h}:iw*{dialogue_x}:ih*{dialogue_y}" "./{video_stem}_dialogue_crop.png"
+python -c "
+from PIL import Image
+img = Image.open('./{video_stem}_sample.png')
+W, H = img.size
+# name 框
+img.crop((int(W*{name_x}), int(H*{name_y}), int(W*({name_x}+{name_w})), int(H*({name_y}+{name_h})))).save('./{video_stem}_name_crop.png')
+# dialogue 框
+img.crop((int(W*{dialogue_x}), int(H*{dialogue_y}), int(W*({dialogue_x}+{dialogue_w})), int(H*({dialogue_y}+{dialogue_h})))).save('./{video_stem}_dialogue_crop.png')
+"
 ```
 
 用 `Read` 工具查看裁切后的图片，逐项确认：
@@ -541,8 +559,19 @@ Based on results:
 Before running OCR, extract a sample frame from each video (at 30s or 10% of duration) and visually inspect them to determine if the dialogue UI layout is consistent across all videos:
 
 ```bash
-# Extract one sample frame from each video
-ffmpeg -ss 30 -i "{video_path}" -frames:v 1 -q:v 2 "./{video_stem}_sample.png"
+# Extract one sample frame from each video (using PyAV from requirements.txt)
+python -c "
+import av
+container = av.open('{video_path}')
+stream = container.streams.video[0]
+target_ts = 30  # seconds
+stream.seek(int(target_ts / stream.time_base))
+for frame in container.decode(video=0):
+    img = frame.to_image()
+    img.save('./{video_stem}_sample.png')
+    break
+container.close()
+"
 ```
 
 Use the `Read` tool to view all sample screenshots and determine:
@@ -562,10 +591,17 @@ Check if a matching config exists in `${CLAUDE_SKILL_DIR}/tools/configs/`. If no
 **ROI Accuracy Verification**: After creating or loading the ROI config, you must verify the selection accuracy using sample screenshots. Crop the ROI regions with:
 
 ```bash
-# Crop name box and dialogue box using normalized ROI coordinates
+# Crop name box and dialogue box using Pillow with normalized ROI coordinates
 # Assuming name_roi=(x, y, w, h), dialogue_roi=(x, y, w, h), all 0-1 normalized
-ffmpeg -i "./{video_stem}_sample.png" -vf "crop=iw*{name_w}:ih*{name_h}:iw*{name_x}:ih*{name_y}" "./{video_stem}_name_crop.png"
-ffmpeg -i "./{video_stem}_sample.png" -vf "crop=iw*{dialogue_w}:ih*{dialogue_h}:iw*{dialogue_x}:ih*{dialogue_y}" "./{video_stem}_dialogue_crop.png"
+python -c "
+from PIL import Image
+img = Image.open('./{video_stem}_sample.png')
+W, H = img.size
+# name box
+img.crop((int(W*{name_x}), int(H*{name_y}), int(W*({name_x}+{name_w})), int(H*({name_y}+{name_h})))).save('./{video_stem}_name_crop.png')
+# dialogue box
+img.crop((int(W*{dialogue_x}), int(H*{dialogue_y}), int(W*({dialogue_x}+{dialogue_w})), int(H*({dialogue_y}+{dialogue_h})))).save('./{video_stem}_dialogue_crop.png')
+"
 ```
 
 Use the `Read` tool to view the cropped images and verify each:
