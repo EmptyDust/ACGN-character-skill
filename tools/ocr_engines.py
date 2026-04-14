@@ -33,6 +33,11 @@ def _create_paddleocr():
     import os
     os.environ.setdefault('FLAGS_call_stack_level', '2')
     os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
+    os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+    os.environ.setdefault('MKL_NUM_THREADS', '1')
+    os.environ.setdefault('OMP_NUM_THREADS', '1')
+    os.environ.setdefault('GLOG_minloglevel', '2')
+    os.environ.setdefault('FLAGS_allocator_strategy', 'auto_growth')
     try:
         from paddleocr import PaddleOCR
     except ImportError:
