@@ -15,5 +15,5 @@ paddleocr>=2.8              # PaddleOCR text recognition
 # easyocr>=1.7
 # rapidocr-onnxruntime>=1.3
 
-# Optional: GUI-based ROI calibration (uncomment if needed)
-# opencv-python>=4.8
+# GUI-based ROI calibration
+opencv-python>=4.8
