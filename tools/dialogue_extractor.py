@@ -8,13 +8,20 @@ processing pipeline with resume support.
 
 import json
 import argparse
+import re
+import math
 from dataclasses import asdict
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set
 from PIL import Image
+from tqdm import tqdm
 
 from tools.ocr_engines import create_ocr_func  # noqa: F401 -- re-export for backwards compat
+
+
+def _build_progress_desc(video_name: str, event_count: int) -> str:
+    return f"{video_name} events:{event_count}"
 
 
 class DialogueExtractor:
@@ -66,6 +73,9 @@ class DialogueExtractor:
             self.review_threshold = review_threshold if review_threshold is not None else self.work_config.review_threshold
             self.speaker_aliases = self.work_config.speaker_aliases
             self.special_speakers = self.work_config.special_speakers
+            self.parse_speaker_from_dialog_text = self.work_config.parse_speaker_from_dialog_text
+            self.require_dialogue_quote = self.work_config.require_dialogue_quote
+            self.skip_non_dialogue_events = self.work_config.skip_non_dialogue_events
         else:
             self.ocr_engine = ocr_engine or self._config_dict.get("ocr_engine", "paddleocr")
             self.fallback_engine = self._config_dict.get("fallback_engine")
@@ -76,6 +86,9 @@ class DialogueExtractor:
             self.speaker_aliases = {k: (v if v else []) for k, v in raw_aliases.items()} if isinstance(raw_aliases, dict) else {}
             from tools.speaker_extractor import DEFAULT_SPECIAL_SPEAKERS
             self.special_speakers = self._config_dict.get("special_speakers", DEFAULT_SPECIAL_SPEAKERS.copy())
+            self.parse_speaker_from_dialog_text = self._config_dict.get("parse_speaker_from_dialog_text", False)
+            self.require_dialogue_quote = self._config_dict.get("require_dialogue_quote", False)
+            self.skip_non_dialogue_events = self._config_dict.get("skip_non_dialogue_events", False)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.video_id = self.video_path.stem
@@ -96,18 +109,33 @@ class DialogueExtractor:
         text = event.text.strip()
         if not text:
             return (None, 0.0)
-        parts = text.split(" ", 1)
-        if len(parts) == 2:
-            candidate = parts[0].strip()
-            remaining = parts[1].strip()
+
+        candidates = sorted(known_speakers, key=len, reverse=True)
+        for candidate in candidates:
+            if not text.startswith(candidate):
+                continue
+            remaining = text[len(candidate):].strip()
             if not remaining:
                 return (None, 0.0)
-            if candidate in known_speakers:
-                event.text = remaining
-                # Use speaker_extractor's normalization for consistent alias handling
-                speaker = self._speaker_extractor.normalize_speaker(candidate) if self._speaker_extractor else self.special_speakers.get(candidate, candidate)
-                return (speaker, event.confidence)
+            if self.require_dialogue_quote:
+                quote_match = re.search(r"[「『“]", remaining)
+                if not quote_match:
+                    continue
+                remaining = remaining[quote_match.start():].strip()
+            event.text = remaining
+            speaker = self._speaker_extractor.normalize_speaker(candidate) if self._speaker_extractor else self.special_speakers.get(candidate, candidate)
+            return (speaker, event.confidence)
         return (None, 0.0)
+
+    def _should_skip_event(self, event, speaker) -> bool:
+        text = event.text.strip()
+        if not text:
+            return True
+        if self.require_dialogue_quote and not re.search(r"[「『“]", text):
+            return True
+        if self.skip_non_dialogue_events and not speaker:
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Checkpoint helpers
@@ -415,7 +443,6 @@ class DialogueExtractor:
         known_speakers = speaker_extractor.known_speakers
 
         review_count = 0
-        last_log_time = start_time
         last_frame = None
         last_dialog_crop = None
         cached_speaker = None
@@ -428,103 +455,120 @@ class DialogueExtractor:
         with VideoProcessor(self.video_path, self.config_path) as vp:
             duration = vp.duration
             print(f"[info] Video duration: {duration:.1f}s, resolution: {vp.resolution[0]}x{vp.resolution[1]}")
+            total_seconds = max(duration - start_time, 0.0)
+            initial_progress = 0.0
+            last_progress_timestamp = start_time
 
             jsonl_file = open(self.jsonl_path, file_mode, encoding="utf-8")
-            try:
-                for timestamp, frame in vp.extract_frames(target_fps=self.target_fps, start_time=start_time):
-                    last_frame = frame
-                    dialog_crop = vp.crop_roi(frame, "dialog_box")
-                    if dialog_crop is None:
-                        raise RuntimeError(
-                            "dialog_box ROI crop returned None. "
-                            "Check dialog_box coordinates in your config file."
-                        )
+            with tqdm(
+                total=total_seconds,
+                initial=initial_progress,
+                unit="s",
+                desc=_build_progress_desc(self.video_path.name, event_count),
+                dynamic_ncols=True,
+            ) as progress_bar:
+                try:
+                    for timestamp, frame in vp.extract_frames(target_fps=self.target_fps, start_time=start_time):
+                        delta = max(timestamp - last_progress_timestamp, 0.0)
+                        if delta > 0:
+                            progress_bar.update(delta)
+                            last_progress_timestamp = timestamp
+                        progress_bar.set_description_str(_build_progress_desc(self.video_path.name, event_count))
+                        last_frame = frame
+                        dialog_crop = vp.crop_roi(frame, "dialog_box")
+                        if dialog_crop is None:
+                            raise RuntimeError(
+                                "dialog_box ROI crop returned None. "
+                                "Check dialog_box coordinates in your config file."
+                            )
 
-                    dialog_crop_processed = apply_profile(dialog_crop, dialog_profile)
-                    last_dialog_crop = dialog_crop
+                        dialog_crop_processed = apply_profile(dialog_crop, dialog_profile)
+                        last_dialog_crop = dialog_crop
 
-                    finalized_event = event_detector.process_frame(dialog_crop_processed, timestamp)
-                    # Capture dialog OCR candidates IMMEDIATELY after dialog OCR
-                    current_dialog_candidates = fusion.get_candidates()
-                    current_selection_reason = fusion.get_selection_reason()
+                        finalized_event = event_detector.process_frame(dialog_crop_processed, timestamp)
+                        current_dialog_candidates = fusion.get_candidates()
+                        current_selection_reason = fusion.get_selection_reason()
 
-                    if finalized_event:
-                        event_count += 1
+                        if finalized_event:
+                            speaker = cached_speaker
+                            speaker_conf = cached_speaker_conf
+                            if speaker is None and self.parse_speaker_from_dialog_text:
+                                speaker, speaker_conf = self._parse_speaker_from_text(finalized_event, known_speakers)
+                            if self._should_skip_event(finalized_event, speaker):
+                                cached_dialog_candidates = None
+                                cached_selection_reason = ""
+                                continue
+                            event_count += 1
+                            cached_speaker = None
+                            cached_speaker_conf = 0.0
+
+                            provenance = {"source_file": str(self.video_path)}
+                            is_review, _ = self._process_finalized_event(
+                                finalized_event, speaker, speaker_conf,
+                                frame, dialog_crop, vp,
+                                cached_dialog_candidates or current_dialog_candidates,
+                                cached_selection_reason or current_selection_reason,
+                                jsonl_file, provenance,
+                            )
+                            if is_review:
+                                review_count += 1
+
+                            self._save_checkpoint(timestamp, event_count, finalized_event.event_id, event_detector._last_finalized_text)
+
+                            speaker_str = speaker or "?"
+                            text_preview = finalized_event.text[:30] + ("..." if len(finalized_event.text) > 30 else "")
+                            tqdm.write(f"  [{finalized_event.event_id}] {speaker_str}: {text_preview}")
+                            cached_dialog_candidates = None
+                            cached_selection_reason = ""
+                        else:
+                            cached_dialog_candidates = current_dialog_candidates
+                            cached_selection_reason = current_selection_reason
+
+                        if event_detector.current_event is not None and cached_speaker is None:
+                            name_crop = vp.crop_roi(frame, "name_box")
+                            if name_crop is not None:
+                                name_crop_processed = apply_profile(name_crop, name_profile)
+                                s, sc = speaker_extractor.extract_speaker(name_crop_processed)
+                            else:
+                                s, sc = speaker_extractor.extract_speaker(None)
+                            if s is not None:
+                                cached_speaker = s
+                                cached_speaker_conf = sc
+
+                    final_event = event_detector.flush(duration)
+                    if final_event:
                         speaker = cached_speaker
                         speaker_conf = cached_speaker_conf
-                        if speaker is None:
-                            speaker, speaker_conf = self._parse_speaker_from_text(finalized_event, known_speakers)
-                        cached_speaker = None
-                        cached_speaker_conf = 0.0
+                        if speaker is None and self.parse_speaker_from_dialog_text:
+                            speaker, speaker_conf = self._parse_speaker_from_text(final_event, known_speakers)
+                        if self._should_skip_event(final_event, speaker):
+                            final_event = None
+                        if final_event is not None:
+                            event_count += 1
+                            provenance = {"source_file": str(self.video_path)}
+                            final_crop = last_dialog_crop or (vp.crop_roi(last_frame, "dialog_box") if last_frame else None) or Image.new("RGB", (100, 50))
+                            final_frame = last_frame or Image.new("RGB", (100, 50))
 
-                        provenance = {"source_file": str(self.video_path)}
-                        is_review, _ = self._process_finalized_event(
-                            finalized_event, speaker, speaker_conf,
-                            frame, dialog_crop, vp,
-                            cached_dialog_candidates or current_dialog_candidates,
-                            cached_selection_reason or current_selection_reason,
-                            jsonl_file, provenance,
-                        )
-                        if is_review:
-                            review_count += 1
+                            is_review, _ = self._process_finalized_event(
+                                final_event, speaker, speaker_conf,
+                                final_frame, final_crop, vp,
+                                cached_dialog_candidates,
+                                cached_selection_reason,
+                                jsonl_file, provenance,
+                            )
+                            if is_review:
+                                review_count += 1
 
-                        self._save_checkpoint(timestamp, event_count, finalized_event.event_id, event_detector._last_finalized_text)
+                            speaker_str = speaker or "?"
+                            text_preview = final_event.text[:30] + ("..." if len(final_event.text) > 30 else "")
+                            tqdm.write(f"  [{final_event.event_id}] {speaker_str}: {text_preview}")
 
-                        speaker_str = speaker or "?"
-                        text_preview = finalized_event.text[:30] + ("..." if len(finalized_event.text) > 30 else "")
-                        print(f"  [{finalized_event.event_id}] {speaker_str}: {text_preview}")
-                        cached_dialog_candidates = None
-                        cached_selection_reason = ""
-                    else:
-                        # Cache the latest dialog candidates for later use on finalization
-                        cached_dialog_candidates = current_dialog_candidates
-                        cached_selection_reason = current_selection_reason
-
-                    if timestamp - last_log_time >= 30.0:
-                        progress = (timestamp / duration * 100) if duration > 0 else 0
-                        print(f"[progress] {timestamp:.1f}s / {duration:.1f}s ({progress:.0f}%), events: {event_count}")
-                        last_log_time = timestamp
-
-                    # Cache speaker for active event (do NOT reset - allow inheritance)
-                    if event_detector.current_event is not None and cached_speaker is None:
-                        name_crop = vp.crop_roi(frame, "name_box")
-                        if name_crop is not None:
-                            name_crop_processed = apply_profile(name_crop, name_profile)
-                            s, sc = speaker_extractor.extract_speaker(name_crop_processed)
-                        else:
-                            s, sc = speaker_extractor.extract_speaker(None)
-                        if s is not None:
-                            cached_speaker = s
-                            cached_speaker_conf = sc
-
-                # Flush remaining event
-                final_event = event_detector.flush(duration)
-                if final_event:
-                    event_count += 1
-                    speaker = cached_speaker
-                    speaker_conf = cached_speaker_conf
-                    if speaker is None:
-                        speaker, speaker_conf = self._parse_speaker_from_text(final_event, known_speakers)
-
-                    provenance = {"source_file": str(self.video_path)}
-                    final_crop = last_dialog_crop or (vp.crop_roi(last_frame, "dialog_box") if last_frame else None) or Image.new("RGB", (100, 50))
-                    final_frame = last_frame or Image.new("RGB", (100, 50))
-
-                    is_review, _ = self._process_finalized_event(
-                        final_event, speaker, speaker_conf,
-                        final_frame, final_crop, vp,
-                        cached_dialog_candidates,
-                        cached_selection_reason,
-                        jsonl_file, provenance,
-                    )
-                    if is_review:
-                        review_count += 1
-
-                    speaker_str = speaker or "?"
-                    text_preview = final_event.text[:30] + ("..." if len(final_event.text) > 30 else "")
-                    print(f"  [{final_event.event_id}] {speaker_str}: {text_preview}")
-            finally:
-                jsonl_file.close()
+                    remaining = max(duration - last_progress_timestamp, 0.0)
+                    if remaining > 0:
+                        progress_bar.update(remaining)
+                    progress_bar.set_description_str(_build_progress_desc(self.video_path.name, event_count))
+                finally:
+                    jsonl_file.close()
 
         # Post-hoc: merge typewriter prefix fragments
         merged_count = self._merge_prefix_events()

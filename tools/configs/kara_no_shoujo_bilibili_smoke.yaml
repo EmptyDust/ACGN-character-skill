@@ -1,0 +1,23 @@
+work_id: kara_no_shoujo_bilibili_smoke
+name: "壳之少女 B站录像 - smoke test"
+
+dialog_box:
+  x: 0.115
+  y: 0.045
+  w: 0.800
+  h: 0.420
+
+name_box:
+  x: 0.900
+  y: 0.900
+  w: 0.050
+  h: 0.050
+
+dialog_preprocess: outline_heavy
+name_preprocess: default
+
+ocr_engine: paddleocr
+target_fps: 1.0
+review_threshold: 0.7
+
+speaker_aliases: {}

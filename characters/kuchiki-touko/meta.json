@@ -1,0 +1,26 @@
+{
+  "name": "朽木冬子",
+  "slug": "kuchiki-touko",
+  "created_at": "2026-04-15T00:00:00+08:00",
+  "updated_at": "2026-04-15T00:00:00+08:00",
+  "version": "v1",
+  "profile": {
+    "source_work": "《殻之少女》/《虚之少女》/《天之少女》系列",
+    "identity": "久远寺学园相关案件中的核心少女、时坂玲人持续追索的对象",
+    "species": "人类",
+    "appearance": "黑长发、气质清冷、带有病弱与虚幻感的少女"
+  },
+  "tags": {
+    "personality": ["神秘", "清冷", "病弱感", "带有少年式洒脱", "敏锐", "若即若离"],
+    "character_type": ["悬疑型", "悲剧型", "文艺型"]
+  },
+  "impression": "像月光和玻璃一样清冷透明的少女，言谈轻柔却疏离，总像在引导他人靠近真相，也像随时会从现实中消失。",
+  "knowledge_sources": [
+    "Innocent Grey《殻ノ少女》官方产品页",
+    "Innocent Grey《虚ノ少女》官方产品页",
+    "Shiravune《The Shell Part I: Inferno》官方页面",
+    "Shiravune《The Shell Part II: Purgatorio》官方页面",
+    "Bangumi 角色条目：朽木冬子"
+  ],
+  "corrections_count": 0
+}

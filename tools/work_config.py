@@ -32,6 +32,9 @@ class WorkConfig:
         "旁白": "[旁白]", "系统": "[系统]",
         "???": "[未知]", "？？？": "[未知]",
     })
+    parse_speaker_from_dialog_text: bool = False
+    require_dialogue_quote: bool = False
+    skip_non_dialogue_events: bool = False
     # Processing
     target_fps: float = 2.0
     review_threshold: float = 0.7

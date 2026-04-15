@@ -1,0 +1,40 @@
+work_id: kara_no_shoujo_dialogue_bilibili
+name: "壳之少女 B站录像 - dialogue only"
+
+dialog_box:
+  x: 0.125
+  y: 0.790
+  w: 0.770
+  h: 0.170
+
+name_box:
+  x: 0.900
+  y: 0.900
+  w: 0.050
+  h: 0.050
+
+dialog_preprocess: semi_transparent
+name_preprocess: default
+
+ocr_engine: paddleocr
+parse_speaker_from_dialog_text: true
+require_dialogue_quote: true
+skip_non_dialogue_events: true
+target_fps: 1.0
+review_threshold: 0.7
+
+speaker_aliases:
+  时坂: [时坂玲人]
+  玲人: []
+  鱼住: [鱼住哲雄]
+  冬子: [朽木冬子]
+  朽木: [朽木冬子]
+  紫: []
+  托丽子: [时坂托丽子]
+  菜菜美: []
+  理奈: []
+  小雪: []
+  斑目: []
+  高城: []
+  和菜: []
+  环: []

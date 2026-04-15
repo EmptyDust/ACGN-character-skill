@@ -6,6 +6,7 @@ Pillow>=10.0
 numpy>=1.24
 av>=12.0                    # PyAV - video frame extraction
 PyYAML>=6.0
+tqdm>=4.66
 
 # Primary OCR engine
 paddlepaddle>=2.6           # PaddlePaddle deep learning framework

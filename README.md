@@ -138,6 +138,41 @@ live2d/                         # 月下 Live2D 模型文件
 
 ## 安装与使用
 
+### Python 环境
+
+推荐使用 `uv` 创建项目本地虚拟环境，避免把 `paddlepaddle`、`paddleocr`、`opencv-python` 这类重依赖直接装进全局 Python。
+
+```bash
+# 1) 创建项目虚拟环境
+uv venv
+
+# 2) 激活环境
+source .venv/bin/activate
+
+# 3) 安装运行依赖
+uv pip install -r requirements.txt
+
+# 4) 如果你要跑仓库里的测试
+uv pip install -e ".[dev]"
+```
+
+如果你不想使用 `uv`，也可以用标准库的 `venv`：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e ".[dev]"
+```
+
+仓库现在也提供了 [pyproject.toml](/Users/fengling/github/ACGN-character-skill/pyproject.toml)，因此你也可以直接使用：
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
 ### 安装 Skill
 
 ```bash
@@ -232,7 +267,7 @@ Live2D 来源：B站 [支线路人A](https://space.bilibili.com/1152374880)
 
 项目使用 PaddleOCR 作为主引擎，EasyOCR 作为备用引擎，通过 ROI 区域裁剪 + 状态机事件检测 + 打字机合并的方式从游戏剧情视频中提取对话台本。每部作品需要一份独立的 ROI 配置文件（`tools/configs/*.yaml`），定义对话框和名字框的位置。
 
-运行方式（需要安装 paddlepaddle 和 paddleocr）：
+运行方式（默认假设你已经激活了项目根目录下的 `.venv`）：
 
 ```bash
 # 单个视频
@@ -243,6 +278,15 @@ python -m tools.dialogue_extractor "training data" tools/configs/yuexia.yaml --o
 ```
 
 提取产物保存在输出目录下，每个视频对应一个 `.jsonl`（结构化数据）和一个 `.txt`（纯文本台本）文件。
+
+如果你使用的是 `uv` 工作流，一个完整示例是：
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+python -m tools.dialogue_extractor "training data/视频文件.mp4" tools/configs/yuexia.yaml --output-dir "training data/ocr_output"
+```
 
 ---
 

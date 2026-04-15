@@ -45,10 +45,7 @@ def _create_paddleocr():
 
     ocr = PaddleOCR(use_textline_orientation=True, lang="ch")
 
-    def ocr_func(image: Image.Image) -> tuple[str, float]:
-        import numpy as np
-        img_array = np.array(image)
-        result = ocr.ocr(img_array, cls=True)
+    def _from_legacy_result(result) -> tuple[str, float]:
         if result and result[0]:
             texts = []
             confidences = []
@@ -57,6 +54,32 @@ def _create_paddleocr():
                 confidences.append(line[1][1])
             return (" ".join(texts), sum(confidences) / len(confidences))
         return ("", 0.0)
+
+    def _from_predict_result(result) -> tuple[str, float]:
+        if not result:
+            return ("", 0.0)
+
+        first = result[0]
+        if isinstance(first, dict):
+            texts = list(first.get("rec_texts") or [])
+            confidences = list(first.get("rec_scores") or [])
+            if texts:
+                avg = sum(confidences) / len(confidences) if confidences else 0.0
+                return (" ".join(texts), float(avg))
+        return ("", 0.0)
+
+    def ocr_func(image: Image.Image) -> tuple[str, float]:
+        import numpy as np
+        img_array = np.array(image)
+        try:
+            result = ocr.predict(img_array)
+            return _from_predict_result(result)
+        except TypeError:
+            # Fall back to the older PaddleOCR API shape.
+            pass
+
+        result = ocr.ocr(img_array)
+        return _from_legacy_result(result)
 
     return ocr_func
 
